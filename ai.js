@@ -24,8 +24,7 @@ export async function onRequest(context) {
   try {
     const contentType = request.headers.get('content-type') || '';
 
-    // ... (multipart/form-data and other cases remain the same) ...
-
+    // --- A. Handles initial video generation from an UPLOADED file ---
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
       const prompt = formData.get('prompt');
@@ -42,16 +41,19 @@ export async function onRequest(context) {
       return await startImageToVideoJob(imageUrlForRunway, prompt, duration, ratio, imageFile.name, env);
     }
     
+    // --- B. Handles JSON-based requests (status checks, image generation, video from URL) ---
     else if (contentType.includes('application/json')) {
       const body = await request.json();
       const { action } = body;
 
       switch (action) {
+        // --- B1. Start text-to-image job ---
         case 'generateImage': {
-          // This part works, so no changes needed here
           const { prompt, ratio } = body;
           if (!prompt) throw new Error('Image prompt is missing.');
+
           const imageKey = `generated-images/${Date.now()}-${prompt.substring(0, 20).replace(/\s/g, '_')}.png`;
+          
           const runwayResponse = await fetch(`${RUNWAY_API_BASE}/text_to_image`, {
             method: 'POST',
             headers: COMMON_HEADERS,
@@ -62,63 +64,49 @@ export async function onRequest(context) {
               seed: Math.floor(Math.random() * 4294967295),
             }),
           });
+          
           const data = await runwayResponse.json();
           if (!runwayResponse.ok) throw new Error(data.error || `Runway T2I API error: ${runwayResponse.status}`);
+          
+          // Store task info for polling
           await env.TASK_INFO_KV.put(data.id, JSON.stringify({
-            type: 'image', r2Key: imageKey, r2PublicUrl: env.R2_PUBLIC_URL
+            type: 'image',
+            r2Key: imageKey,
+            r2PublicUrl: env.R2_PUBLIC_URL
           }));
+
           return jsonResponse({ success: true, taskId: data.id });
         }
         
+        // --- B2. Start video generation from a PRE-EXISTING image URL ---
         case 'startVideoFromUrl': {
-          // This part works, so no changes needed here
           const { videoPrompt, imageUrl, duration, ratio } = body;
           if (!videoPrompt || !imageUrl) throw new Error("Missing video prompt or image URL.");
           return await startImageToVideoJob(imageUrl, videoPrompt, parseInt(duration || '5', 10), ratio || '1280:720', 'generated-image', env);
         }
 
-        // --- B3. Poll for status of any task (WITH ADDED LOGGING) ---
+        // --- B3. Poll for status of any task ---
         case 'status': {
           const { taskId } = body;
           if (!taskId) throw new Error('Invalid status check request.');
           
           const statusUrl = `${RUNWAY_API_BASE}/tasks/${taskId}`;
-          const response = await fetch(statusUrl, { headers: { ...COMMON_HEADERS, 'Content-Type': undefined } });
+          const response = await fetch(statusUrl, { headers: { ...COMMON_HEADERS, 'Content-Type': undefined } }); // Don't send Content-Type on GET-like requests
           const data = await response.json();
           
           if (!response.ok) throw new Error(`Status check failed: ${data.error || response.statusText}`);
 
           if (data.status === 'SUCCEEDED' && data.output?.[0]) {
-            // --- START OF DEBUG LOGS ---
-            console.log(`[${taskId}] Task SUCCEEDED. Preparing to save output.`);
             const taskInfo = await env.TASK_INFO_KV.get(taskId, { type: 'json' });
+            if (!taskInfo || !taskInfo.r2Key) throw new Error(`Could not find R2 destination for task ${taskId}.`);
 
-            if (!taskInfo || !taskInfo.r2Key) {
-              console.error(`[${taskId}] CRITICAL ERROR: Could not find R2 destination key in KV.`);
-              throw new Error(`Could not find R2 destination key for task ${taskId}.`);
-            }
-            console.log(`[${taskId}] Found KV info. Type: ${taskInfo.type}, R2 Key: ${taskInfo.r2Key}`);
-            
             const runwayOutputUrl = data.output[0];
-            console.log(`[${taskId}] Attempting to download from Runway URL: ${runwayOutputUrl}`);
-            
             const outputResponse = await fetch(runwayOutputUrl);
-            
-            if (!outputResponse.ok) {
-              console.error(`[${taskId}] FAILED to download from Runway. Status: ${outputResponse.status} ${outputResponse.statusText}`);
-              throw new Error(`Failed to download generated content from Runway. Status: ${outputResponse.status}`);
-            }
-            console.log(`[${taskId}] Download from Runway successful. Status: ${outputResponse.status}`);
+            if (!outputResponse.ok) throw new Error(`Failed to download from Runway. Status: ${outputResponse.status}`);
             
             const contentType = taskInfo.type === 'image' ? 'image/png' : 'video/mp4';
-            console.log(`[${taskId}] Attempting to save to R2 with Content-Type: ${contentType}`);
-
-            await env.IMAGE_BUCKET.put(taskInfo.r2Key, outputResponse.body, {
-              httpMetadata: { contentType }
-            });
-            console.log(`[${taskId}] R2 'put' operation completed successfully.`);
-            // --- END OF DEBUG LOGS ---
-
+            await env.IMAGE_BUCKET.put(taskInfo.r2Key, outputResponse.body, { httpMetadata: { contentType } });
+            
             const finalUrl = `${taskInfo.r2PublicUrl}/${taskInfo.r2Key}`;
             context.waitUntil(env.TASK_INFO_KV.delete(taskId));
             
@@ -140,12 +128,12 @@ export async function onRequest(context) {
     } 
     else { throw new Error(`Invalid request content-type.`); }
   } catch (error) {
-    console.error('Caught a top-level error:', error.message); // Added more context to error logging
+    console.error(error);
     return jsonResponse({ success: false, error: error.message }, 500);
   }
 }
 
-// ... (helper functions remain the same) ...
+// Helper function to start the image-to-video job
 async function startImageToVideoJob(imageUrl, prompt, duration, ratio, originalName, env) {
   const RUNWAY_API_BASE = 'https://api.dev.runwayml.com/v1';
   const videoKey = `videos/${Date.now()}-${originalName.split('.').slice(0, -1).join('.') || originalName}.mp4`;
@@ -176,6 +164,7 @@ async function startImageToVideoJob(imageUrl, prompt, duration, ratio, originalN
   return jsonResponse({ success: true, taskId: data.id, status: data.status });
 }
 
+// Helper for consistent JSON responses
 function jsonResponse(data, status = 200) {
     return new Response(JSON.stringify(data), {
         status: status,

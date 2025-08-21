@@ -1,7 +1,7 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-// ../.wrangler/tmp/bundle-xlu7Dh/checked-fetch.js
+// ../.wrangler/tmp/bundle-YKfMgf/checked-fetch.js
 var urls = /* @__PURE__ */ new Set();
 function checkURL(request, init) {
   const url = request instanceof URL ? request : new URL(
@@ -64,7 +64,6 @@ async function onRequest(context) {
       const body = await request.json();
       const { action } = body;
       switch (action) {
-        // --- B1. Start text-to-image job ---
         case "generateImage": {
           const { prompt, ratio } = body;
           if (!prompt) throw new Error("Image prompt is missing.");
@@ -88,13 +87,12 @@ async function onRequest(context) {
           }));
           return jsonResponse({ success: true, taskId: data.id });
         }
-        // --- B2. Start video generation from a PRE-EXISTING image URL ---
         case "startVideoFromUrl": {
           const { videoPrompt, imageUrl, duration, ratio } = body;
           if (!videoPrompt || !imageUrl) throw new Error("Missing video prompt or image URL.");
           return await startImageToVideoJob(imageUrl, videoPrompt, parseInt(duration || "5", 10), ratio || "1280:720", "generated-image", env);
         }
-        // --- B3. Poll for status of any task ---
+        // --- B3. Poll for status of any task (WITH ADDED LOGGING) ---
         case "status": {
           const { taskId } = body;
           if (!taskId) throw new Error("Invalid status check request.");
@@ -103,13 +101,27 @@ async function onRequest(context) {
           const data = await response.json();
           if (!response.ok) throw new Error(`Status check failed: ${data.error || response.statusText}`);
           if (data.status === "SUCCEEDED" && data.output?.[0]) {
+            console.log(`[${taskId}] Task SUCCEEDED. Preparing to save output.`);
             const taskInfo = await env.TASK_INFO_KV.get(taskId, { type: "json" });
-            if (!taskInfo || !taskInfo.r2Key) throw new Error(`Could not find R2 destination for task ${taskId}.`);
+            if (!taskInfo || !taskInfo.r2Key) {
+              console.error(`[${taskId}] CRITICAL ERROR: Could not find R2 destination key in KV.`);
+              throw new Error(`Could not find R2 destination key for task ${taskId}.`);
+            }
+            console.log(`[${taskId}] Found KV info. Type: ${taskInfo.type}, R2 Key: ${taskInfo.r2Key}`);
             const runwayOutputUrl = data.output[0];
+            console.log(`[${taskId}] Attempting to download from Runway URL: ${runwayOutputUrl}`);
             const outputResponse = await fetch(runwayOutputUrl);
-            if (!outputResponse.ok) throw new Error(`Failed to download from Runway. Status: ${outputResponse.status}`);
+            if (!outputResponse.ok) {
+              console.error(`[${taskId}] FAILED to download from Runway. Status: ${outputResponse.status} ${outputResponse.statusText}`);
+              throw new Error(`Failed to download generated content from Runway. Status: ${outputResponse.status}`);
+            }
+            console.log(`[${taskId}] Download from Runway successful. Status: ${outputResponse.status}`);
             const contentType2 = taskInfo.type === "image" ? "image/png" : "video/mp4";
-            await env.IMAGE_BUCKET.put(taskInfo.r2Key, outputResponse.body, { httpMetadata: { contentType: contentType2 } });
+            console.log(`[${taskId}] Attempting to save to R2 with Content-Type: ${contentType2}`);
+            await env.IMAGE_BUCKET.put(taskInfo.r2Key, outputResponse.body, {
+              httpMetadata: { contentType: contentType2 }
+            });
+            console.log(`[${taskId}] R2 'put' operation completed successfully.`);
             const finalUrl = `${taskInfo.r2PublicUrl}/${taskInfo.r2Key}`;
             context.waitUntil(env.TASK_INFO_KV.delete(taskId));
             const successPayload = { success: true, status: data.status, progress: data.progress };
@@ -129,7 +141,7 @@ async function onRequest(context) {
       throw new Error(`Invalid request content-type.`);
     }
   } catch (error) {
-    console.error(error);
+    console.error("Caught a top-level error:", error.message);
     return jsonResponse({ success: false, error: error.message }, 500);
   }
 }
@@ -666,7 +678,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// ../.wrangler/tmp/bundle-xlu7Dh/middleware-insertion-facade.js
+// ../.wrangler/tmp/bundle-YKfMgf/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -698,7 +710,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// ../.wrangler/tmp/bundle-xlu7Dh/middleware-loader.entry.ts
+// ../.wrangler/tmp/bundle-YKfMgf/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;
